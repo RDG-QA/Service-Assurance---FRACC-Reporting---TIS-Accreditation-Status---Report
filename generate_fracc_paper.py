@@ -710,6 +710,81 @@ def build_fracc_excel(
              value=val,
              font=_font(bold=True, size=10.0))
 
+    # ═══════════════════════════════════════════════════════════
+    # NATIVE PIE CHART (openpyxl) — linked to Sheet 3 data cells
+    # Matches reference exactly: PieChart, varyColors, per-slice colours,
+    # category + % labels, legend right, title "Accreditation Status"
+    # ═══════════════════════════════════════════════════════════
+    from openpyxl.chart import PieChart, Reference
+    from openpyxl.chart.series import DataPoint
+    from openpyxl.chart.label import DataLabelList
+    from openpyxl.drawing.colors import ColorChoice
+    from openpyxl.chart.shapes import GraphicalProperties
+    from openpyxl.drawing.line import LineProperties
+    from openpyxl.chart.legend import Legend
+
+    # Number of state rows (excludes header + Total Devices row)
+    n_states = len(counts)
+    last_state_row = 1 + n_states   # rows 2..n_states+1
+
+    pie = PieChart()
+    pie.title = "Accreditation Status"
+    pie.varyColors = True
+    pie.firstSliceAng = 0
+
+    # Data: counts column (B2:Bn)
+    data_ref = Reference(ws3, min_col=2, min_row=1, max_row=last_state_row)
+    pie.add_data(data_ref, titles_from_data=True)
+
+    # Categories: state names column (A2:An)
+    cat_ref = Reference(ws3, min_col=1, min_row=2, max_row=last_state_row)
+    pie.set_categories(cat_ref)
+
+    # Per-slice fill colours — match state colours exactly
+    SLICE_COLOURS = {
+        "Accredited":               "C6EFCE",
+        "Pilot phase":              "FFEB9C",
+        "Accreditation expired":    "FFC7CE",
+        "Application acknowledged": "FFEB9C",
+    }
+    state_list = list(counts.keys())
+    for idx, state in enumerate(state_list):
+        hex_col = SLICE_COLOURS.get(state, "CCCCCC")
+        dp = DataPoint(idx=idx)
+        dp.graphicalProperties = GraphicalProperties(
+            solidFill=hex_col
+        )
+        pie.series[0].dPt.append(dp)
+
+    # Data labels: show category name + percentage
+    pie.dLbls = DataLabelList()
+    pie.dLbls.showCatName  = True
+    pie.dLbls.showPercent  = True
+    pie.dLbls.showSerName  = True
+    pie.dLbls.showVal      = False
+    pie.dLbls.showLegendKey = True
+    pie.dLbls.showLeaderLines = True
+
+    # Legend on the right, overlaid
+    pie.legend = Legend()
+    pie.legend.legendPos = "r"
+    pie.legend.overlay   = True
+
+    # Size (EMUs): 6480000 x 5040000 = 6.75" x 5.25" ≈ 15cm x 7.5cm
+    pie.width  = 15
+    pie.height = 7.5
+
+    # Position: anchor at col=3 (D), row=1 (row 2, 0-indexed)
+    from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
+    from openpyxl.drawing.xdr import XDRPositiveSize2D
+
+    marker = AnchorMarker(col=3, colOff=0, row=1, rowOff=0)
+    size   = XDRPositiveSize2D(cx=6480000, cy=5040000)
+    pie.anchor = OneCellAnchor(_from=marker, ext=size)
+
+    ws3.add_chart(pie)
+    print("    ✓ Native PieChart added to 'Accreditation Status Chart' sheet")
+
     # ── Save ──────────────────────────────────────────────────
     fname = f"FRACC - TIS Accreditation Status - Latest - {timestamp}.xlsx"
     fpath = os.path.join(output_dir, fname)
