@@ -217,7 +217,7 @@ def build_manual():
     story.append(Paragraph("User Manual", S["cover_sub"]))
     story.append(Spacer(1, 0.3 * cm))
     story.append(Paragraph("Rail Delivery Group — Service Assurance", S["cover_meta"]))
-    story.append(Paragraph("Version 1.0 &nbsp;|&nbsp; June 2026", S["cover_meta"]))
+    story.append(Paragraph("Version 1.4 &nbsp;|&nbsp; June 2026", S["cover_meta"]))
     story.append(Spacer(1, 0.6 * cm))
     story.append(HRFlowable(width=DOC_W, thickness=1.5, color=RDG_BLUE))
     story.append(Spacer(1, 0.4 * cm))
@@ -667,9 +667,28 @@ def build_manual():
 
     vh_data = [
         ["Version", "Date", "Changes"],
-        ["1.0", "June 2026",
+        ["1.0", "May 2026",
          "Initial release. Full pipeline: collated report → peak counts → Excel → "
          "pie chart → Word patches → hyperlinked appendix list."],
+        ["1.1", "June 2026",
+         "Added support for raw stacked collated format (multiple weekly blocks in a single "
+         "sheet). Definitive LPC → Owning Group mapping replacing dual-alias approach. "
+         "Added WM TRAINS and LUMO STIRLING mappings."],
+        ["1.2", "June 2026",
+         "Pixel-perfect Excel formatting to match reference file: Aptos font throughout, "
+         "FFRRGGBB fill colours, exact column widths (A=46, B=14, D=22, E=10, F=16), "
+         "medium outer borders, row heights (OG=18, TOC=15, header=15, data=14). "
+         "Pivot Data and Accreditation Status Chart sheets also reformatted to match."],
+        ["1.3", "June 2026",
+         "Added native openpyxl PieChart to the Accreditation Status Chart sheet. "
+         "Chart is linked directly to data cells with per-slice state colours "
+         "(Accredited=C6EFCE, Pilot phase=FFEB9C, Expired=FFC7CE), category + percentage "
+         "labels, and legend on the right. Generated on every run automatically."],
+        ["1.4", "June 2026",
+         "Removed 'Appendix X — ' prefix from Excel Owning Group header rows and from "
+         "Word document section heading paragraphs above each TOC table. "
+         "The TOC navigation list at the top of the Word doc retains Appendix labels "
+         "as these are hyperlink anchors, not table headings."],
     ]
     vh_tbl = Table(vh_data, colWidths=[2 * cm, 2.5 * cm, DOC_W - 4.5 * cm])
     vh_tbl.setStyle(table_style())
