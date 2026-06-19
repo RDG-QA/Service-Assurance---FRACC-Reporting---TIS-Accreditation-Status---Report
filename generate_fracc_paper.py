@@ -13,12 +13,24 @@ Usage:
         --template  "FRACC Paper Template.docx" \\
         --paper-date "16 June 2026" \\
         [--output-dir "./output"]
+        [--news-image "assist_news.png"]
+
+Supported collated file formats
+    1. Raw stacked format  — multiple weekly blocks in one sheet,
+       each starting with "Shift date range used: From …" row,
+       with a "Lennon profit centre" column header (first block only).
+       This is the output of the portal downloader collate.py script.
+
+    2. Pivot export format — a sheet that already has an
+       "Owning Group" column (e.g. the Pivot Data sheet of a
+       previously generated FRACC Excel output).
 
 Parameters:
     --collated      Path to the collated master Excel report.
     --template      Path to the FRACC Word template (.docx).
     --paper-date    Date string for the Paper Date field, e.g. "16 June 2026".
     --output-dir    Optional output folder (default: current directory).
+    --news-image    Optional path to ASSIST News widget screenshot (.png).
 
 Outputs (written to --output-dir):
     FRACC - TIS Accreditation Status - Latest - <YYYYMMDD_HHMM>.xlsx
@@ -49,17 +61,15 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from lxml import etree
 from openpyxl import Workbook
-from openpyxl.styles import (
-    Alignment, Border, Font, PatternFill, Side
-)
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 
 # ════════════════════════════════════════════════════════════════════
-# CONSTANTS
+# CONSTANTS — Appendix / Owning Group structure
 # ════════════════════════════════════════════════════════════════════
 
-# Appendix → Owning Group mapping (display order in the paper)
+# Display order of Owning Groups in the paper (Appendix letter → display name)
 APPENDIX_MAP = [
     ("A",  "Go Ahead"),
     ("B",  "Transport UK Group (formerly Abellio Group)"),
@@ -74,32 +84,83 @@ APPENDIX_MAP = [
     ("L",  "Scottish Rail Holdings"),
 ]
 
-# Owning group name aliases (raw data value → canonical display name)
-# Handles variations between source portal data and display names
+# ── LPC → Owning Group ──────────────────────────────────────────────
+# Definitive mapping of every Lennon Profit Centre (LPC) code that
+# appears in the portal data to its Owning Group (Appendix group).
+# Only LPCs listed here are included in the FRACC output.
+# All others (3rd-party retailers, HQ inputs, etc.) are excluded.
+LPC_TO_OWNING_GROUP = {
+    # Go Ahead (currently no LPCs after GTR remap, kept for future use)
+    # — (none) —
+
+    # Transport UK Group (formerly Abellio Group)
+    "EAST MIDLANDS RAILWAY":            "Transport UK Group (formerly Abellio Group)",
+
+    # Serco / Transport UK Group (formerly Abellio Group)
+    "MERSEYRAIL ELECTRICS 2002 LTD":    "Serco / Transport UK Group (formerly Abellio Group)",
+
+    # First Group
+    "GREAT WESTERN RAILWAY HK":         "First Group",
+    "HULL TRAINS LTD":                  "First Group",
+    "LUMO":                             "First Group",
+    "LUMO STIRLING":                    "First Group",
+    "WEST COAST PARTNERSHIP":           "First Group",
+
+    # Directly Operated Railway
+    "C2C":                              "Directly Operated Railway",
+    "GREATER ANGLIA":                   "Directly Operated Railway",
+    "GTR - SOUTHERN & GATWICK EXPRESS": "Directly Operated Railway",
+    "GTR-THAMESLINK & GREAT NORTHERN":  "Directly Operated Railway",
+    "ISLAND LINE":                      "Directly Operated Railway",
+    "LONDON NORTH EASTERN RAILWAY":     "Directly Operated Railway",
+    "NORTHERN - WEST":                  "Directly Operated Railway",
+    "SOUTH WESTERN RAILWAY":            "Directly Operated Railway",
+    "SOUTHEASTERN":                     "Directly Operated Railway",
+    "TRANSPENNINE TRAINS":              "Directly Operated Railway",
+    "WEST MIDLANDS TRAINS LTD":         "Directly Operated Railway",
+    "WM TRAINS":                        "Directly Operated Railway",   # portal alias
+
+    # Arriva
+    "ARRIVA CROSS COUNTRY":             "Arriva",
+    "GRAND CENTRAL":                    "Arriva",
+    "THE CHILTERN RAILWAY CO. LTD":     "Arriva",
+
+    # Transport for Wales
+    "TRANSPORT FOR WALES":              "Transport for Wales",
+
+    # London Overground
+    "LONDON OVERGROUND":                "London Overground",
+
+    # GTS Elizabeth Line
+    "GTS ELIZABETH LINE":               "GTS Elizabeth Line",
+
+    # Heathrow Express Operating Company
+    "HEATHROW EXPRESS LTD":             "Heathrow Express Operating Company",
+
+    # Scottish Rail Holdings
+    "CALEDONIAN SLEEPERS":              "Scottish Rail Holdings",
+    "SCOTRAIL":                         "Scottish Rail Holdings",
+}
+
+# Normalisation aliases for the Owning Group field when reading a pivot export
+# (handles minor naming variations in previously generated files)
 OG_ALIASES = {
-    "serco/transport uk group (formerly abellio group)": "Serco / Transport UK Group (formerly Abellio Group)",
-    "transport uk group (formerly abellio group)":       "Transport UK Group (formerly Abellio Group)",
-    "gts elizabeth line":                                "GTS Elizabeth Line",
-    "arriva":                                            "Arriva",
-    "go ahead":                                          "Go Ahead",
-    "first group":                                       "First Group",
-    "directly operated railway":                         "Directly Operated Railway",
-    "transport for wales":                               "Transport for Wales",
-    "london overground":                                 "London Overground",
-    "heathrow express operating company":                "Heathrow Express Operating Company",
-    "scottish rail holdings":                            "Scottish Rail Holdings",
+    "serco/transport uk group (formerly abellio group)":
+        "Serco / Transport UK Group (formerly Abellio Group)",
+    "transport uk group (formerly abellio group)":
+        "Transport UK Group (formerly Abellio Group)",
+    "gts elizabeth line":   "GTS Elizabeth Line",
+    "arriva":               "Arriva",
+    "go ahead":             "Go Ahead",
+    "first group":          "First Group",
+    "directly operated railway": "Directly Operated Railway",
+    "transport for wales":  "Transport for Wales",
+    "london overground":    "London Overground",
+    "heathrow express operating company": "Heathrow Express Operating Company",
+    "scottish rail holdings": "Scottish Rail Holdings",
 }
 
-# TOC-level owning group overrides
-# These take precedence over whatever Owning Group the source data carries.
-# Format: { "TOC / LPC value (exact)": "Canonical Owning Group name" }
-TOC_OG_OVERRIDES = {
-    "GTR - SOUTHERN & GATWICK EXPRESS":  "Directly Operated Railway",
-    "GTR-THAMESLINK & GREAT NORTHERN":   "Directly Operated Railway",
-    "WEST MIDLANDS TRAINS LTD":          "Directly Operated Railway",
-}
-
-# Bookmark names for each appendix (must match bookmarks in template)
+# Bookmark names in the Word template for each appendix
 BOOKMARK_MAP = {
     "A": "Appendix_A",
     "B": "Appendix_B",
@@ -118,126 +179,168 @@ BOOKMARK_MAP = {
     "P": "AppendixP",
 }
 
-# Colour palette
-COLOURS = {
-    "Accredited":             "#00B050",
-    "Pilot phase":            "#92D050",
-    "Accreditation expired":  "#EE0000",
-    "Application acknowledged": "#FFC000",
-}
-
-# Header fill colour (dark navy, matching RDG template)
-HDR_FILL_HEX  = "1F3864"
-HDR_FONT_HEX  = "FFFFFF"
-SUBHDR_FILL   = "D6E4F0"
-SUBHDR_FONT   = "1F3864"
-
+# Accreditation state colour coding (Excel cell fill / font)
 STATE_FILL = {
-    "Accredited":             "C6EFCE",
-    "Pilot phase":            "E2EFDA",
-    "Accreditation expired":  "FFC7CE",
+    "Accredited":               "C6EFCE",
+    "Pilot phase":              "E2EFDA",
+    "Accreditation expired":    "FFC7CE",
     "Application acknowledged": "FFEB9C",
 }
 STATE_FONT = {
-    "Accredited":             "276221",
-    "Pilot phase":            "375623",
-    "Accreditation expired":  "9C0006",
+    "Accredited":               "276221",
+    "Pilot phase":              "375623",
+    "Accreditation expired":    "9C0006",
     "Application acknowledged": "9C6500",
 }
 
+# Excel structural colours
+HDR_FILL_HEX  = "1F3864"   # RDG navy — Owning Group header rows
+HDR_FONT_HEX  = "FFFFFF"   # White
+SUBHDR_FILL   = "D6E4F0"   # Light blue — TOC sub-header rows
+SUBHDR_FONT   = "1F3864"   # RDG navy
+COL_HDR_FILL  = "EBF3FB"   # Very light blue — column header rows
+COL_HDR_FONT  = "1F3864"   # RDG navy
+
 
 # ════════════════════════════════════════════════════════════════════
-# STEP 1 — Load & normalise collated report
+# STEP 1 — Load & normalise the collated report
 # ════════════════════════════════════════════════════════════════════
 
 def load_collated_report(path: str) -> pd.DataFrame:
     """
     Load the collated TOC TIS master report.
 
-    The file may be either:
-    - A raw weekly-format file (header at row 4, data from row 5)
-    - A pre-collated pivot export with a direct header row
+    Detects two formats automatically:
+      A) Raw stacked format  — multiple "Shift date range…" blocks in
+         one sheet.  Produced by collate.py / the weekly portal download.
+      B) Pivot export format — sheet already has 'Owning Group' and
+         'Count' columns (e.g. Pivot Data sheet of a previous FRACC Excel).
 
     Returns a normalised DataFrame with columns:
         Owning Group, TOC / LPC, System, Machine Type ID,
         Version, State, Count, CoA Expiry
+    Only rows whose TOC/LPC appears in LPC_TO_OWNING_GROUP are kept.
     """
     print(f"\n[1] Loading collated report: {os.path.basename(path)}")
 
-    # Try reading as a pivot export first (scan all sheets for 'Owning Group' column)
+    # ── Try pivot export (scan all sheets for 'Owning Group' + 'Count') ──
     try:
         xl = pd.ExcelFile(path, engine="openpyxl")
         for sheet in xl.sheet_names:
             df = xl.parse(sheet)
             if "Owning Group" in df.columns and "Count" in df.columns:
                 df = _normalise_pivot(df)
-                print(f"    Loaded as pivot export from sheet '{sheet}' — {len(df)} rows")
+                print(f"    Detected pivot export (sheet='{sheet}') — "
+                      f"{len(df)} rows before TOC filter")
+                df = _apply_lpc_filter(df)
+                print(f"    After TOC filter: {len(df)} rows")
                 return df
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"    (pivot scan failed: {e})")
 
-    # Fall back to raw weekly format
+    # ── Fall back to raw stacked format ───────────────────────────────
     raw = pd.read_excel(path, header=None, engine="openpyxl")
-    date_range_str = str(raw.iloc[2, 0]) if pd.notna(raw.iloc[2, 0]) else ""
-    data = raw.iloc[5:].copy()
-    data.columns = [str(c).replace("\n", " ").strip() for c in raw.iloc[4].tolist()]
-    data = data.dropna(how="all")
-    m = re.search(r"to\s+(\d{2}-\w+-\d{4})", date_range_str)
-    report_date = pd.to_datetime(m.group(1), format="%d-%b-%Y") if m else pd.NaT
-    data["_report_date"] = report_date
-    data["Count"] = pd.to_numeric(data["Count"], errors="coerce").fillna(0).astype(int)
-    print(f"    Loaded as raw weekly format — {len(data)} rows (report date: {report_date})")
-    return _normalise_raw(data)
+    df  = _parse_raw_stacked(raw)
+    print(f"    Detected raw stacked format — {len(df)} rows before TOC filter")
+    df  = _apply_lpc_filter(df)
+    print(f"    After TOC filter: {len(df)} rows")
+    return df
+
+
+def _parse_raw_stacked(raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Parse a raw stacked collated file (multiple weekly blocks in one sheet).
+
+    Structure per block:
+        "Shift date range used: From DD-Mon-YYYY to DD-Mon-YYYY"  ← block header
+        [optional "Lennon profit centre" column header row]
+        data rows …
+
+    The column header row appears only in the first block; subsequent blocks
+    jump straight into data rows.
+    """
+    # Find the column header row (Lennon profit centre)
+    col_header_idx = None
+    for i, row in raw.iterrows():
+        if str(row.iloc[0]).strip() == "Lennon profit centre":
+            col_header_idx = i
+            break
+
+    if col_header_idx is None:
+        raise ValueError("Could not find 'Lennon profit centre' column header row "
+                         "in the collated file.")
+
+    col_names = [str(c).replace("\n", " ").strip()
+                 for c in raw.iloc[col_header_idx].tolist()]
+
+    # Find all block-start rows ("Shift date range…")
+    block_starts = [
+        i for i, row in raw.iterrows()
+        if "Shift date range" in str(row.iloc[0])
+    ]
+
+    if not block_starts:
+        raise ValueError("No 'Shift date range' rows found — "
+                         "is this a raw stacked collated file?")
+
+    frames = []
+    for bi, start in enumerate(block_starts):
+        end       = block_starts[bi + 1] if bi + 1 < len(block_starts) else len(raw)
+        date_str  = str(raw.iloc[start, 0])
+
+        block = raw.iloc[start + 1:end].copy()
+        # Drop column-header rows that got re-embedded (first-block artefact)
+        block = block[block.iloc[:, 0] != "Lennon profit centre"]
+        block = block[block.iloc[:, 0].notna()]
+        block = block[block.iloc[:, 0].astype(str).str.strip() != ""]
+        block.columns = col_names
+        block = block.reset_index(drop=True)
+
+        m = re.search(r"to\s+(\d{2}-\w+-\d{4})", date_str)
+        block["_report_date"] = (
+            pd.to_datetime(m.group(1), format="%d-%b-%Y") if m else pd.NaT
+        )
+        frames.append(block)
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined["Count"] = (
+        pd.to_numeric(combined["Count"], errors="coerce").fillna(0).astype(int)
+    )
+
+    # Rename raw columns to standard names
+    combined = combined.rename(columns={
+        "Lennon profit centre": "TOC / LPC",
+        "CoA expiry date":      "CoA Expiry",
+    })
+
+    # Derive Owning Group from LPC
+    combined["Owning Group"] = combined["TOC / LPC"].apply(
+        lambda lpc: LPC_TO_OWNING_GROUP.get(str(lpc).strip().upper(), None)
+    )
+
+    return combined[[
+        "Owning Group", "TOC / LPC", "System", "Machine Type ID",
+        "Version", "State", "Count", "CoA Expiry",
+    ]]
 
 
 def _normalise_pivot(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalise a pivot-style export."""
-    df = df.rename(columns={
-        "Owning Group":  "Owning Group",
-        "TOC / LPC":     "TOC / LPC",
-        "System":        "System",
-        "Machine Type ID": "Machine Type ID",
-        "Version":       "Version",
-        "State":         "State",
-        "Count":         "Count",
-        "CoA Expiry":    "CoA Expiry",
-    })
+    """Normalise a pivot-style export that already has an Owning Group column."""
+    df = df.copy()
     df["Count"] = pd.to_numeric(df["Count"], errors="coerce").fillna(0).astype(int)
+    # Normalise Owning Group names
     df["Owning Group"] = df["Owning Group"].apply(_canonicalise_og)
-    # Apply per-TOC owning group overrides
+    # Re-derive Owning Group from LPC for overridden TOCs
     df["Owning Group"] = df.apply(
-        lambda r: TOC_OG_OVERRIDES.get(str(r["TOC / LPC"]).strip(), r["Owning Group"]),
-        axis=1
+        lambda r: LPC_TO_OWNING_GROUP.get(
+            str(r.get("TOC / LPC", "")).strip().upper(), r["Owning Group"]
+        ),
+        axis=1,
     )
-    return df[[c for c in ["Owning Group","TOC / LPC","System","Machine Type ID",
-                            "Version","State","Count","CoA Expiry"] if c in df.columns]]
-
-
-def _normalise_raw(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalise a raw weekly-format DataFrame.
-    The raw format has 'Lennon profit centre' and 'Company' but no
-    Owning Group — we derive it from the Company column via the alias map.
-    """
-    df = df.rename(columns={
-        "Lennon profit centre": "TOC / LPC",
-        "Company":              "System",       # System vendor
-        "Machine Type ID":      "Machine Type ID",
-        "Version":              "Version",
-        "State":                "State",
-        "Count":                "Count",
-        "CoA expiry date":      "CoA Expiry",
-        "Latest shift":         "_latest_shift",
-    })
-    # Raw format does not carry Owning Group — set as Unknown for peak logic
-    df["Owning Group"] = "Unknown"
-    # Apply per-TOC owning group overrides
-    df["Owning Group"] = df.apply(
-        lambda r: TOC_OG_OVERRIDES.get(str(r.get("TOC / LPC", "")).strip(), r["Owning Group"]),
-        axis=1
-    )
-    return df[["Owning Group","TOC / LPC","System","Machine Type ID",
-               "Version","State","Count","CoA Expiry"]]
+    return df[[c for c in [
+        "Owning Group", "TOC / LPC", "System", "Machine Type ID",
+        "Version", "State", "Count", "CoA Expiry",
+    ] if c in df.columns]]
 
 
 def _canonicalise_og(name) -> str:
@@ -247,41 +350,52 @@ def _canonicalise_og(name) -> str:
     return OG_ALIASES.get(key, str(name).strip())
 
 
+def _apply_lpc_filter(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Keep only rows whose Owning Group is a known appendix group
+    (i.e. rows with a valid LPC mapping).
+    """
+    known_ogs = {og for _, og in APPENDIX_MAP}
+    return df[df["Owning Group"].isin(known_ogs)].reset_index(drop=True)
+
+
 # ════════════════════════════════════════════════════════════════════
 # STEP 2 — Apply peak-count logic
 # ════════════════════════════════════════════════════════════════════
 
 def apply_peak_counts(df: pd.DataFrame) -> pd.DataFrame:
     """
-    For every combination of (Owning Group, TOC/LPC, System, Machine Type ID, Version)
-    take the highest Count ever recorded across all historical weekly blocks.
-    The State and CoA Expiry are taken from the row with the peak count.
+    For every (Owning Group, TOC/LPC, System, Machine Type ID, Version)
+    combination, take the highest Count ever recorded across all historical
+    weekly blocks.  State and CoA Expiry come from the peak-count row.
     """
     print("\n[2] Applying peak-count logic…")
     key_cols = ["Owning Group", "TOC / LPC", "System", "Machine Type ID", "Version"]
-
-    # Sort so the highest count is first, then deduplicate on key columns
-    df_sorted = df.sort_values("Count", ascending=False)
-    peak = df_sorted.drop_duplicates(subset=key_cols, keep="first").copy()
-    peak = peak.sort_values(["Owning Group", "TOC / LPC", "System", "Machine Type ID", "Version"])
-    print(f"    {len(df)} rows → {len(peak)} unique combinations after peak-count")
-    return peak.reset_index(drop=True)
+    peak = (
+        df.sort_values("Count", ascending=False)
+          .drop_duplicates(subset=key_cols, keep="first")
+          .sort_values(["Owning Group", "TOC / LPC", "System",
+                        "Machine Type ID", "Version"])
+          .reset_index(drop=True)
+    )
+    print(f"    {len(df)} rows → {len(peak)} unique peak-count combinations")
+    return peak
 
 
 # ════════════════════════════════════════════════════════════════════
-# STEP 3 — Build FRACC Excel output
+# EXCEL STYLE HELPERS
 # ════════════════════════════════════════════════════════════════════
 
 def _thin_border():
-    side = Side(style="thin", color="BFBFBF")
-    return Border(left=side, right=side, top=side, bottom=side)
+    s = Side(style="thin", color="BFBFBF")
+    return Border(left=s, right=s, top=s, bottom=s)
 
 
-def _header_font(bold=True, colour=HDR_FONT_HEX, size=11):
+def _hdr_font(bold=True, colour=HDR_FONT_HEX, size=11):
     return Font(bold=bold, color=colour, name="Calibri", size=size)
 
 
-def _header_fill(hex_colour=HDR_FILL_HEX):
+def _hdr_fill(hex_colour=HDR_FILL_HEX):
     return PatternFill("solid", fgColor=hex_colour)
 
 
@@ -293,174 +407,201 @@ def _left():
     return Alignment(horizontal="left", vertical="center", wrap_text=True)
 
 
-def build_fracc_excel(peak_df: pd.DataFrame, paper_date_str: str,
-                      output_dir: str, timestamp: str) -> str:
+def _set_cell(cell, value=None, font=None, fill=None, alignment=None, border=None):
+    if value is not None:
+        cell.value = value
+    if font:
+        cell.font = font
+    if fill:
+        cell.fill = fill
+    if alignment:
+        cell.alignment = alignment
+    if border:
+        cell.border = border
+
+
+# ════════════════════════════════════════════════════════════════════
+# STEP 3 — Build FRACC Excel output
+# ════════════════════════════════════════════════════════════════════
+
+def build_fracc_excel(
+    peak_df: pd.DataFrame,
+    paper_date_str: str,
+    output_dir: str,
+    timestamp: str,
+) -> tuple:
     """
-    Build the FRACC TIS Accreditation Status Excel file.
+    Build the FRACC TIS Accreditation Status Excel workbook.
 
     Sheet 1 — TIS Accreditation Status
-        Grouped by Owning Group > TOC/LPC with coloured State cells.
+        Grouped: Owning Group header → TOC sub-header →
+                 column headers → colour-coded data rows.
 
     Sheet 2 — Pivot Data
-        Flat table of all records (used for validation / mail merge).
+        Flat table of all peak-count rows.
 
     Sheet 3 — Accreditation Status Chart
-        Summary counts by State + a pie chart.
+        Summary counts by State (data source for pie chart).
     """
     print("\n[3] Building FRACC Excel file…")
-
     wb = Workbook()
 
-    # ── Sheet 1: TIS Accreditation Status ──────────────────────────
+    # ── Sheet 1: TIS Accreditation Status ─────────────────────────────
     ws1 = wb.active
     ws1.title = "TIS Accreditation Status"
 
-    col_headers = ["System", "Machine Type ID", "Version", "State", "Count", "CoA Expiry"]
-    col_widths   = [38, 18, 16, 26, 10, 16]
+    DATA_COLS   = ["System", "Machine Type ID", "Version", "State", "Count", "CoA Expiry"]
+    COL_WIDTHS  = [40, 18, 16, 28, 10, 16]
 
     row_num = 1
-    owning_groups = [og for og, _ in APPENDIX_MAP]
 
     for app_letter, og_display in APPENDIX_MAP:
-        og_data = peak_df[peak_df["Owning Group"] == og_display].copy()
+        # Match on both exact and case-insensitive
+        og_data = peak_df[peak_df["Owning Group"] == og_display]
         if og_data.empty:
-            # Try case-insensitive match
             og_data = peak_df[
                 peak_df["Owning Group"].str.lower() == og_display.lower()
-            ].copy()
+            ]
         if og_data.empty:
-            continue
+            continue  # Skip owning groups with no data
 
-        # ── Owning Group header row ──────────────────────────────
-        ws1.merge_cells(start_row=row_num, start_column=1,
-                        end_row=row_num, end_column=6)
-        cell = ws1.cell(row=row_num, column=1,
-                        value=f"Appendix {app_letter} — {og_display}")
-        cell.font   = _header_font(size=12)
-        cell.fill   = _header_fill()
-        cell.alignment = _centre()
-        cell.border = _thin_border()
+        # ── Owning Group header row ──────────────────────────────────
+        ws1.merge_cells(
+            start_row=row_num, start_column=1,
+            end_row=row_num,   end_column=6
+        )
+        c = ws1.cell(row=row_num, column=1,
+                     value=f"Appendix {app_letter} — {og_display}")
+        c.font      = Font(bold=True, color=HDR_FONT_HEX, name="Calibri", size=12)
+        c.fill      = _hdr_fill(HDR_FILL_HEX)
+        c.alignment = _centre()
+        c.border    = _thin_border()
         row_num += 1
 
-        # ── TOC sub-groups ────────────────────────────────────────
+        # ── TOC sub-groups ────────────────────────────────────────────
         for toc in sorted(og_data["TOC / LPC"].dropna().unique()):
             toc_data = og_data[og_data["TOC / LPC"] == toc]
 
             # TOC sub-header
-            ws1.merge_cells(start_row=row_num, start_column=1,
-                            end_row=row_num, end_column=6)
-            toc_cell = ws1.cell(row=row_num, column=1, value=toc)
-            toc_cell.font      = Font(bold=True, color=SUBHDR_FONT, name="Calibri", size=10)
-            toc_cell.fill      = PatternFill("solid", fgColor=SUBHDR_FILL)
-            toc_cell.alignment = _left()
-            toc_cell.border    = _thin_border()
+            ws1.merge_cells(
+                start_row=row_num, start_column=1,
+                end_row=row_num,   end_column=6
+            )
+            tc = ws1.cell(row=row_num, column=1, value=toc)
+            tc.font      = Font(bold=True, color=SUBHDR_FONT, name="Calibri", size=10)
+            tc.fill      = PatternFill("solid", fgColor=SUBHDR_FILL)
+            tc.alignment = _left()
+            tc.border    = _thin_border()
             row_num += 1
 
             # Column headers
-            for ci, hdr in enumerate(col_headers, start=1):
-                c = ws1.cell(row=row_num, column=ci, value=hdr)
-                c.font      = Font(bold=True, color="1F3864", name="Calibri", size=9)
-                c.fill      = PatternFill("solid", fgColor="EBF3FB")
-                c.alignment = _centre()
-                c.border    = _thin_border()
+            for ci, hdr in enumerate(DATA_COLS, start=1):
+                ch = ws1.cell(row=row_num, column=ci, value=hdr)
+                ch.font      = Font(bold=True, color=COL_HDR_FONT,
+                                    name="Calibri", size=9)
+                ch.fill      = PatternFill("solid", fgColor=COL_HDR_FILL)
+                ch.alignment = _centre()
+                ch.border    = _thin_border()
             row_num += 1
 
             # Data rows
             for _, drow in toc_data.sort_values(
                     ["System", "Machine Type ID", "Version"]).iterrows():
-                state = str(drow.get("State", ""))
+                state    = str(drow.get("State", ""))
                 fill_hex = STATE_FILL.get(state, "FFFFFF")
                 font_hex = STATE_FONT.get(state, "000000")
 
                 vals = [
-                    drow.get("System", ""),
+                    drow.get("System",          ""),
                     drow.get("Machine Type ID", ""),
-                    drow.get("Version", ""),
+                    drow.get("Version",         ""),
                     state,
                     drow.get("Count", 0),
-                    drow.get("CoA Expiry", ""),
+                    drow.get("CoA Expiry",      ""),
                 ]
                 for ci, val in enumerate(vals, start=1):
-                    c = ws1.cell(row=row_num, column=ci, value=val)
-                    c.border    = _thin_border()
-                    c.alignment = _centre() if ci != 1 else _left()
-                    c.font      = Font(name="Calibri", size=9)
-                    if ci == 4:  # State column — colour coded
-                        c.fill = PatternFill("solid", fgColor=fill_hex)
-                        c.font = Font(bold=True, color=font_hex,
-                                      name="Calibri", size=9)
+                    dc = ws1.cell(row=row_num, column=ci, value=val)
+                    dc.border    = _thin_border()
+                    dc.alignment = _left() if ci == 1 else _centre()
+                    dc.font      = Font(name="Calibri", size=9)
+                    if ci == 4:  # State — colour coded
+                        dc.fill = PatternFill("solid", fgColor=fill_hex)
+                        dc.font = Font(bold=True, color=font_hex,
+                                       name="Calibri", size=9)
                 row_num += 1
 
-        row_num += 1  # blank gap between owning groups
+        row_num += 1  # blank spacer row between owning groups
 
-    # Set column widths
-    for ci, w in enumerate(col_widths, start=1):
+    for ci, w in enumerate(COL_WIDTHS, start=1):
         ws1.column_dimensions[get_column_letter(ci)].width = w
-
-    # Freeze header-ish row
     ws1.freeze_panes = "A1"
 
-    # ── Sheet 2: Pivot Data ─────────────────────────────────────────
+    # ── Sheet 2: Pivot Data ────────────────────────────────────────────
     ws2 = wb.create_sheet("Pivot Data")
-    pivot_cols = ["Owning Group", "TOC / LPC", "System",
-                  "Machine Type ID", "Version", "State", "Count", "CoA Expiry"]
-    pivot_widths = [30, 38, 38, 18, 16, 26, 10, 16]
+    PIVOT_COLS   = ["Owning Group", "TOC / LPC", "System",
+                    "Machine Type ID", "Version", "State", "Count", "CoA Expiry"]
+    PIVOT_WIDTHS = [34, 40, 40, 18, 16, 28, 10, 16]
 
-    for ci, hdr in enumerate(pivot_cols, start=1):
-        c = ws2.cell(row=1, column=ci, value=hdr)
-        c.font      = _header_font()
-        c.fill      = _header_fill()
-        c.alignment = _centre()
-        c.border    = _thin_border()
+    for ci, hdr in enumerate(PIVOT_COLS, start=1):
+        ch = ws2.cell(row=1, column=ci, value=hdr)
+        ch.font      = _hdr_font()
+        ch.fill      = _hdr_fill()
+        ch.alignment = _centre()
+        ch.border    = _thin_border()
 
-    export_df = peak_df[[c for c in pivot_cols if c in peak_df.columns]]
+    export_df = peak_df[[c for c in PIVOT_COLS if c in peak_df.columns]]
     for ri, (_, row) in enumerate(export_df.iterrows(), start=2):
-        for ci, col in enumerate(pivot_cols, start=1):
+        for ci, col in enumerate(PIVOT_COLS, start=1):
             val = row.get(col, "")
-            c = ws2.cell(row=ri, column=ci, value=val)
-            c.border    = _thin_border()
-            c.alignment = _left() if ci <= 3 else _centre()
-            c.font      = Font(name="Calibri", size=9)
+            dc  = ws2.cell(row=ri, column=ci, value=val)
+            dc.border    = _thin_border()
+            dc.alignment = _left() if ci <= 3 else _centre()
+            dc.font      = Font(name="Calibri", size=9)
             if col == "State":
                 state = str(val)
-                c.fill = PatternFill("solid", fgColor=STATE_FILL.get(state, "FFFFFF"))
-                c.font = Font(bold=True, color=STATE_FONT.get(state, "000000"),
-                              name="Calibri", size=9)
+                dc.fill = PatternFill("solid",
+                                      fgColor=STATE_FILL.get(state, "FFFFFF"))
+                dc.font = Font(bold=True,
+                               color=STATE_FONT.get(state, "000000"),
+                               name="Calibri", size=9)
 
-    for ci, w in enumerate(pivot_widths, start=1):
+    for ci, w in enumerate(PIVOT_WIDTHS, start=1):
         ws2.column_dimensions[get_column_letter(ci)].width = w
     ws2.freeze_panes = "A2"
 
-    # ── Sheet 3: Accreditation Status Chart ────────────────────────
+    # ── Sheet 3: Accreditation Status Chart ───────────────────────────
     ws3 = wb.create_sheet("Accreditation Status Chart")
-    state_order = ["Accredited", "Pilot phase", "Accreditation expired",
-                   "Application acknowledged"]
-    counts = {}
-    for state in state_order:
-        total = int(peak_df[peak_df["State"] == state]["Count"].sum())
-        if total > 0:
-            counts[state] = total
+    STATE_ORDER = [
+        "Accredited", "Pilot phase",
+        "Accreditation expired", "Application acknowledged",
+    ]
+    counts = {
+        s: int(peak_df[peak_df["State"] == s]["Count"].sum())
+        for s in STATE_ORDER
+        if int(peak_df[peak_df["State"] == s]["Count"].sum()) > 0
+    }
     grand_total = sum(counts.values())
 
-    ws3.cell(row=1, column=1, value="Accreditation Status").font = _header_font()
-    ws3.cell(row=1, column=1).fill = _header_fill()
+    ws3.cell(row=1, column=1, value="Accreditation Status").font = _hdr_font()
+    ws3.cell(row=1, column=1).fill      = _hdr_fill()
     ws3.cell(row=1, column=1).alignment = _centre()
-    ws3.cell(row=1, column=2, value="Count").font = _header_font()
-    ws3.cell(row=1, column=2).fill = _header_fill()
+    ws3.cell(row=1, column=2, value="Count").font = _hdr_font()
+    ws3.cell(row=1, column=2).fill      = _hdr_fill()
     ws3.cell(row=1, column=2).alignment = _centre()
 
     for ri, (state, cnt) in enumerate(counts.items(), start=2):
         ws3.cell(row=ri, column=1, value=state).border = _thin_border()
-        ws3.cell(row=ri, column=2, value=cnt).border = _thin_border()
+        ws3.cell(row=ri, column=2, value=cnt).border   = _thin_border()
 
-    last_data_row = 1 + len(counts)
-    ws3.cell(row=last_data_row + 1, column=1, value="Total Devices").font = Font(bold=True, name="Calibri")
-    ws3.cell(row=last_data_row + 1, column=2, value=grand_total).font = Font(bold=True, name="Calibri")
-
+    last_data = 1 + len(counts)
+    ws3.cell(row=last_data + 1, column=1,
+             value="Total Devices").font = Font(bold=True, name="Calibri")
+    ws3.cell(row=last_data + 1, column=2,
+             value=grand_total).font     = Font(bold=True, name="Calibri")
     ws3.column_dimensions["A"].width = 30
     ws3.column_dimensions["B"].width = 12
 
-    # ── Save ──────────────────────────────────────────────────────
+    # ── Save ──────────────────────────────────────────────────────────
     fname = f"FRACC - TIS Accreditation Status - Latest - {timestamp}.xlsx"
     fpath = os.path.join(output_dir, fname)
     wb.save(fpath)
@@ -474,20 +615,21 @@ def build_fracc_excel(peak_df: pd.DataFrame, paper_date_str: str,
 
 def generate_pie_chart(counts: dict, total: int, output_dir: str) -> str:
     """
-    Render an accreditation status pie chart.
-    Returns path to the saved PNG.
+    Render the accreditation status pie chart at 180 DPI.
+    Returns the saved PNG path.
     """
     print("\n[4] Generating pie chart…")
 
+    COLOUR_MAP = {
+        "Accredited":               "#00B050",
+        "Pilot phase":              "#92D050",
+        "Accreditation expired":    "#EE0000",
+        "Application acknowledged": "#FFC000",
+    }
+
     labels = list(counts.keys())
     values = list(counts.values())
-    colors = [
-        {"Accredited": "#00B050",
-         "Pilot phase": "#92D050",
-         "Accreditation expired": "#EE0000",
-         "Application acknowledged": "#FFC000"}.get(l, "#AAAAAA")
-        for l in labels
-    ]
+    colors = [COLOUR_MAP.get(l, "#AAAAAA") for l in labels]
 
     fig, ax = plt.subplots(figsize=(9, 5.5))
     fig.patch.set_facecolor("white")
@@ -500,7 +642,7 @@ def generate_pie_chart(counts: dict, total: int, output_dir: str) -> str:
         radius=0.88,
     )
 
-    # Percentage + count labels outside wedges
+    # Labels outside wedges
     for wedge, val in zip(wedges, values):
         angle = (wedge.theta2 + wedge.theta1) / 2
         pct   = val / total * 100
@@ -518,10 +660,12 @@ def generate_pie_chart(counts: dict, total: int, output_dir: str) -> str:
                       edgecolor="none", alpha=0.85),
         )
 
-    # Legend — right side, no overlap
+    # Legend — right side
     legend_patches = [
-        mpatches.Patch(facecolor=c, edgecolor="#cccccc", linewidth=0.8,
-                       label=f"{l}  ({v:,})")
+        mpatches.Patch(
+            facecolor=c, edgecolor="#cccccc", linewidth=0.8,
+            label=f"{l}  ({v:,})",
+        )
         for l, v, c in zip(labels, values, colors)
     ]
     legend = ax.legend(
@@ -562,8 +706,7 @@ def _set_highlight(run, colour="yellow"):
     hl.set(qn("w:val"), colour)
 
 
-def _add_bookmark(para, name, bm_id="99"):
-    """Add a w:bookmarkStart / w:bookmarkEnd pair to a paragraph."""
+def _add_bookmark(para, name, bm_id="199"):
     existing = [b.get(qn("w:name"))
                 for b in para._p.findall(".//" + qn("w:bookmarkStart"))]
     if name in existing:
@@ -579,10 +722,9 @@ def _add_bookmark(para, name, bm_id="99"):
 
 def _make_hyperlink(para, text, anchor):
     """
-    Replace the content of *para* with a single internal hyperlink
-    pointing to *anchor*, preserving any existing run formatting.
+    Replace paragraph content with a single internal hyperlink (w:anchor).
+    Preserves existing run formatting and applies the Hyperlink character style.
     """
-    # Capture existing rPr from first run
     existing_runs = para._p.findall(qn("w:r"))
     if existing_runs:
         existing_rpr = existing_runs[0].find(qn("w:rPr"))
@@ -591,12 +733,10 @@ def _make_hyperlink(para, text, anchor):
     else:
         rpr = OxmlElement("w:rPr")
 
-    # Apply Hyperlink character style
     rStyle = OxmlElement("w:rStyle")
     rStyle.set(qn("w:val"), "Hyperlink")
     rpr.insert(0, rStyle)
 
-    # Build hyperlink element
     hyperlink = OxmlElement("w:hyperlink")
     hyperlink.set(qn("w:anchor"), anchor)
     hyperlink.set(qn("w:history"), "1")
@@ -609,145 +749,145 @@ def _make_hyperlink(para, text, anchor):
     r.append(t)
     hyperlink.append(r)
 
-    # Remove all existing runs/hyperlinks from the paragraph
     for child in list(para._p):
         if child.tag in (qn("w:r"), qn("w:hyperlink")):
             para._p.remove(child)
-
     para._p.append(hyperlink)
 
 
-def patch_word_document(template_path: str, paper_date_str: str,
-                        pie_chart_path: str, news_image_path: str,
-                        output_dir: str) -> str:
+def patch_word_document(
+    template_path:   str,
+    paper_date_str:  str,
+    pie_chart_path:  str,
+    news_image_path: str,
+    output_dir:      str,
+) -> str:
     """
     Apply all patches to the Word template and save the final paper.
 
-    Patches applied:
-      1. Meeting Date → 'XX Month' with yellow highlight
-      2. Paper Date   → paper_date_str
-      3. Update para  → bold date updated to paper_date_str
-      4. Trailer table date cell → 'XX Month' with yellow highlight
-      5. Pie chart image (image1) replaced
-      6. ASSIST News image (image2) replaced  [optional — skipped if no path]
-      7. Appendix list entries → internal hyperlinks
+    Patches:
+      1. Meeting Date paragraph → 'XX Month' with yellow highlight
+      2. Paper Date paragraph   → paper_date_str
+      3. Update para bold date  → paper_date_str
+      4. Trailer table date     → 'XX Month' with yellow highlight
+      5. Pie chart image (image1.png in zip) replaced
+      6. News image (image2.png in zip) replaced  [if supplied]
+      7. Appendix list entries (A–P) → internal Word hyperlinks
     """
     print(f"\n[5] Patching Word document…")
     doc = Document(template_path)
 
-    # ── Parse paper date ────────────────────────────────────────
-    try:
-        paper_dt = datetime.strptime(paper_date_str.strip(), "%d %B %Y")
-    except ValueError:
+    # ── Parse paper date ────────────────────────────────────────────
+    for fmt in ("%d %B %Y", "%d/%m/%Y", "%-d %B %Y"):
         try:
-            paper_dt = datetime.strptime(paper_date_str.strip(), "%d/%m/%Y")
+            paper_dt = datetime.strptime(paper_date_str.strip(), fmt)
+            break
         except ValueError:
-            paper_dt = datetime.now()
-            print(f"    WARNING: Could not parse paper date '{paper_date_str}', "
-                  f"using today ({paper_dt.strftime('%d %B %Y')})")
-    paper_date_display = paper_dt.strftime("%-d %B %Y")  # e.g. "16 June 2026"
-    paper_date_bold_part1 = paper_dt.strftime("%-d %B")  # e.g. "16 June"
-    paper_date_bold_part2 = f" {paper_dt.year}"           # e.g. " 2026"
+            continue
+    else:
+        paper_dt = datetime.now()
+        print(f"    WARNING: Could not parse '{paper_date_str}', "
+              f"using today ({paper_dt.strftime('%d %B %Y')})")
 
-    # ── Find key paragraphs ─────────────────────────────────────
+    paper_date_display = paper_dt.strftime("%-d %B %Y")   # e.g. "16 June 2026"
+    paper_month_day    = paper_dt.strftime("%-d %B")       # e.g. "16 June"
+    paper_year         = f" {paper_dt.year}"               # e.g. " 2026"
+
+    # ── Locate key paragraphs ───────────────────────────────────────
     paras = doc.paragraphs
-
-    # Para indices (based on template structure — robust search fallback)
-    meeting_date_para = None
-    paper_date_para   = None
-    update_para       = None
-    toc_list_start    = None
-    toc_list_end      = None
-
-    for i, p in enumerate(paras):
-        txt = p.text.strip()
-        if txt.startswith("Meeting Date:") and meeting_date_para is None:
-            meeting_date_para = i
-        if txt.startswith("Paper Date:") and paper_date_para is None:
-            paper_date_para = i
-        if ("this report was run on" in txt or "report was run on" in txt) \
-                and update_para is None:
-            update_para = i
-        if txt.startswith("Appendix A") and toc_list_start is None:
-            toc_list_start = i
-        if toc_list_start and txt.startswith("Appendix P"):
-            toc_list_end = i
+    meeting_date_para = next(
+        (i for i, p in enumerate(paras) if p.text.strip().startswith("Meeting Date:")),
+        None,
+    )
+    paper_date_para = next(
+        (i for i, p in enumerate(paras) if p.text.strip().startswith("Paper Date:")),
+        None,
+    )
+    update_para = next(
+        (i for i, p in enumerate(paras)
+         if "this report was run on" in p.text or "report was run on" in p.text),
+        None,
+    )
+    # First "Appendix A…" paragraph before END OF PAPER
+    toc_list_start = next(
+        (i for i, p in enumerate(paras) if p.text.strip().startswith("Appendix A")),
+        None,
+    )
 
     print(f"    meeting_date_para={meeting_date_para}, "
           f"paper_date_para={paper_date_para}, "
           f"update_para={update_para}, "
-          f"toc_list=[{toc_list_start}–{toc_list_end}]")
+          f"toc_list_start={toc_list_start}")
 
-    # ── Patch 1: Meeting Date → 'XX Month' (yellow highlight) ──
+    MONTH_NAMES = [
+        "January","February","March","April","May","June",
+        "July","August","September","October","November","December",
+    ]
+
+    # ── Patch 1: Meeting Date ────────────────────────────────────────
     if meeting_date_para is not None:
         p = paras[meeting_date_para]
         for run in p.runs:
-            if any(m in run.text for m in [
-                    "January","February","March","April","May","June",
-                    "July","August","September","October","November","December",
-                    "XX Month", "Month"]):
+            if any(m in run.text for m in MONTH_NAMES + ["XX Month", "Month"]):
                 run.text = "XX Month"
                 _set_highlight(run, "yellow")
                 break
         print("    ✓ Meeting Date → 'XX Month' (highlighted)")
 
-    # ── Patch 2: Paper Date ─────────────────────────────────────
+    # ── Patch 2: Paper Date ─────────────────────────────────────────
     if paper_date_para is not None:
         p = paras[paper_date_para]
-        # Replace any date-like run with the new paper date
         for run in p.runs:
-            if any(m in run.text for m in [
-                    "January","February","March","April","May","June","July",
-                    "August","September","October","November","December",
-                    "2025","2026","2027"]):
+            if any(m in run.text for m in MONTH_NAMES + ["2025","2026","2027","2028"]):
                 run.text = paper_date_display
                 break
         print(f"    ✓ Paper Date → '{paper_date_display}'")
 
-    # ── Patch 3: Update paragraph date (bold) ──────────────────
+    # ── Patch 3: Update paragraph bold date ─────────────────────────
     if update_para is not None:
-        p = paras[update_para]
+        p    = paras[update_para]
         runs = p.runs
         for ri, run in enumerate(runs):
-            if run.bold and any(m in run.text for m in [
-                    "January","February","March","April","May","June","July",
-                    "August","September","October","November","December"]):
-                run.text = paper_date_bold_part1
+            if run.bold and any(m in run.text for m in MONTH_NAMES):
+                run.text = paper_month_day
+                # Update the immediately following bold run (year part)
                 if ri + 1 < len(runs) and runs[ri + 1].bold:
-                    runs[ri + 1].text = paper_date_bold_part2
+                    runs[ri + 1].text = paper_year
                 break
-        print(f"    ✓ Update para date → '{paper_date_bold_part1}{paper_date_bold_part2}'")
+        print(f"    ✓ Update para date → '{paper_month_day}{paper_year}'")
 
-    # ── Patch 4: Trailer table date cell ───────────────────────
+    # ── Patch 4: Trailer table date cell ────────────────────────────
     if doc.tables:
-        trailer_tbl  = doc.tables[-1]
-        date_cell    = trailer_tbl.rows[0].cells[1]
-        date_cell_p  = date_cell.paragraphs[0]
-        # Clear existing runs
-        for run in date_cell_p.runs:
-            run.clear()
-        if date_cell_p.runs:
-            r = date_cell_p.runs[0]
-            r.text = "XX Month"
-            r.bold = True
-            _set_highlight(r, "yellow")
-            for extra in date_cell_p.runs[1:]:
-                extra._r.getparent().remove(extra._r)
-        print("    ✓ Trailer table date → 'XX Month' (highlighted)")
+        trailer_tbl = doc.tables[-1]
+        try:
+            date_cell = trailer_tbl.rows[0].cells[1]
+            date_para = date_cell.paragraphs[0]
+            for run in date_para.runs:
+                run.clear()
+            if date_para.runs:
+                r      = date_para.runs[0]
+                r.text = "XX Month"
+                r.bold = True
+                _set_highlight(r, "yellow")
+                for extra in date_para.runs[1:]:
+                    extra._r.getparent().remove(extra._r)
+            print("    ✓ Trailer table date → 'XX Month' (highlighted)")
+        except (IndexError, AttributeError):
+            print("    WARNING: Could not patch trailer table date cell")
 
-    # ── Patch 5 & 6: Replace images in the zip ─────────────────
+    # ── Patch 5 & 6: Replace images in the zip ──────────────────────
     doc.save(template_path + ".tmp.docx")
 
     with zipfile.ZipFile(template_path + ".tmp.docx", "r") as zin:
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
-                if item.filename == "word/media/image1.png" \
-                        and pie_chart_path and os.path.exists(pie_chart_path):
+                if (item.filename == "word/media/image1.png"
+                        and pie_chart_path and os.path.exists(pie_chart_path)):
                     with open(pie_chart_path, "rb") as f:
                         zout.writestr(item, f.read())
-                elif item.filename == "word/media/image2.png" \
-                        and news_image_path and os.path.exists(news_image_path):
+                elif (item.filename == "word/media/image2.png"
+                        and news_image_path and os.path.exists(news_image_path)):
                     with open(news_image_path, "rb") as f:
                         zout.writestr(item, f.read())
                 else:
@@ -756,52 +896,52 @@ def patch_word_document(template_path: str, paper_date_str: str,
 
     os.remove(template_path + ".tmp.docx")
 
-    # Reload the patched zip as a Document for hyperlink step
-    doc2 = Document(buf)
+    # ── Patch 7: Appendix list → hyperlinks ─────────────────────────
+    doc2  = Document(buf)
     paras2 = doc2.paragraphs
 
-    # ── Patch 7: Appendix list → hyperlinks ─────────────────────
-    # Ensure Appendix I bookmark exists in the body
-    for i, p in enumerate(paras2):
-        if "Appendix I" in p.text and "GTS Elizabeth Line" in p.text and \
-                "Appendix_I" not in [b.get(qn("w:name"))
-                                     for b in p._p.findall(".//" + qn("w:bookmarkStart"))]:
+    # Ensure Appendix I bookmark exists (may be missing in older templates)
+    for p in paras2:
+        if "Appendix I" in p.text and "GTS Elizabeth Line" in p.text:
             _add_bookmark(p, "Appendix_I", bm_id="199")
 
-    # Build full appendix list — A-L plus M-P
-    all_appendix_letters = [a for a, _ in APPENDIX_MAP] + ["M", "N", "O", "P"]
-    all_appendix_names = {a: n for a, n in APPENDIX_MAP}
-    all_appendix_names.update({
+    # Full list of appendix letters A–P (note: no J)
+    ALL_LETTERS = [a for a, _ in APPENDIX_MAP] + ["M", "N", "O", "P"]
+    APPENDIX_NAMES = {a: n for a, n in APPENDIX_MAP}
+    APPENDIX_NAMES.update({
         "M": "Accreditation Status",
         "N": "RDG Compliance Standards - Recent Updates",
         "O": "Third Party Retailer Systems",
         "P": "Governance Lifecycle Tracking Grid",
     })
 
-    # Find the TOC list paragraphs and convert to hyperlinks
-    toc_start = None
-    converted = 0
+    toc_start    = None
+    converted    = 0
+    toc_finished = False
+
     for i, p in enumerate(paras2):
+        if toc_finished:
+            break
         txt = p.text.strip()
-        # Detect start of the appendix list (first "Appendix A" before END OF PAPER)
-        if txt.startswith("Appendix A") and toc_start is None:
-            # Make sure we're in the TOC section (before body appendices)
+
+        # Detect start of TOC appendix list
+        if toc_start is None and txt.startswith("Appendix A"):
             toc_start = i
+
         if toc_start is not None and i >= toc_start:
-            for letter in all_appendix_letters:
-                prefix = f"Appendix {letter}"
-                if txt.startswith(prefix) and BOOKMARK_MAP.get(letter):
+            for letter in ALL_LETTERS:
+                if txt.startswith(f"Appendix {letter}") and BOOKMARK_MAP.get(letter):
                     _make_hyperlink(p, txt, BOOKMARK_MAP[letter])
                     converted += 1
+                    if letter == "P":
+                        toc_finished = True
                     break
-        # Stop after Appendix P in the TOC list
-        if toc_start and txt.startswith("Appendix P") and i > toc_start + 2:
-            break
 
     print(f"    ✓ Converted {converted} appendix entries to internal hyperlinks")
 
-    # ── Save final document ─────────────────────────────────────
-    out_name = f"FRACC Paper - Accreditation Status Update - {paper_date_display}.docx"
+    # ── Save final document ──────────────────────────────────────────
+    out_name = (f"FRACC Paper - Accreditation Status Update "
+                f"- {paper_date_display}.docx")
     out_path = os.path.join(output_dir, out_name)
 
     final_buf = io.BytesIO()
@@ -820,32 +960,33 @@ def patch_word_document(template_path: str, paper_date_str: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate the monthly FRACC TIS Accreditation Status paper."
+        description="Generate the monthly FRACC TIS Accreditation Status paper.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--collated", required=True,
-        help="Path to the collated TOC TIS master Excel report."
+        help="Path to the collated TOC TIS master Excel report "
+             "(raw stacked or pivot export format).",
     )
     parser.add_argument(
         "--template", required=True,
-        help="Path to the FRACC Paper Word template (.docx)."
+        help="Path to the FRACC Paper Word template (.docx).",
     )
     parser.add_argument(
         "--paper-date", required=True,
-        help='Paper date string, e.g. "16 June 2026" or "16/06/2026".'
+        help='Paper date, e.g. "16 June 2026" or "16/06/2026".',
     )
     parser.add_argument(
         "--output-dir", default=".",
-        help="Output directory for generated files (default: current directory)."
+        help="Output folder for generated files (default: current directory).",
     )
     parser.add_argument(
         "--news-image", default=None,
-        help="(Optional) Path to a screenshot of the ASSIST News widget to embed."
+        help="(Optional) Path to ASSIST News widget screenshot (.png) to embed.",
     )
 
     args = parser.parse_args()
 
-    # Validate inputs
     if not os.path.exists(args.collated):
         print(f"ERROR: Collated report not found: {args.collated}")
         sys.exit(1)
@@ -856,45 +997,38 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
 
-    print("=" * 60)
+    print("=" * 62)
     print("  FRACC TIS Accreditation Status Report Generator")
-    print("=" * 60)
+    print("=" * 62)
     print(f"  Collated report : {args.collated}")
     print(f"  Template        : {args.template}")
     print(f"  Paper date      : {args.paper_date}")
     print(f"  Output dir      : {args.output_dir}")
-    print("=" * 60)
+    print("=" * 62)
 
-    # Step 1 — Load
-    df = load_collated_report(args.collated)
-
-    # Step 2 — Peak counts
+    # ── Pipeline ────────────────────────────────────────────────────
+    df      = load_collated_report(args.collated)
     peak_df = apply_peak_counts(df)
 
-    # Step 3 — Excel output
     excel_path, state_counts, grand_total = build_fracc_excel(
-        peak_df, args.paper_date, args.output_dir, timestamp
+        peak_df, args.paper_date, args.output_dir, timestamp,
     )
-
-    # Step 4 — Pie chart
-    pie_path = generate_pie_chart(state_counts, grand_total, args.output_dir)
-
-    # Step 5 — Word document
+    pie_path  = generate_pie_chart(state_counts, grand_total, args.output_dir)
     docx_path = patch_word_document(
-        template_path  = args.template,
-        paper_date_str = args.paper_date,
-        pie_chart_path = pie_path,
-        news_image_path= args.news_image,
-        output_dir     = args.output_dir,
+        template_path   = args.template,
+        paper_date_str  = args.paper_date,
+        pie_chart_path  = pie_path,
+        news_image_path = args.news_image,
+        output_dir      = args.output_dir,
     )
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 62)
     print("  ✓  Generation complete")
-    print("=" * 60)
-    print(f"  Excel  → {os.path.basename(excel_path)}")
-    print(f"  Word   → {os.path.basename(docx_path)}")
-    print(f"  Chart  → {os.path.basename(pie_path)}")
-    print("=" * 60)
+    print("=" * 62)
+    print(f"  Excel → {os.path.basename(excel_path)}")
+    print(f"  Word  → {os.path.basename(docx_path)}")
+    print(f"  Chart → {os.path.basename(pie_path)}")
+    print("=" * 62)
 
 
 if __name__ == "__main__":
