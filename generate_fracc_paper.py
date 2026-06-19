@@ -433,148 +433,249 @@ def build_fracc_excel(
     """
     Build the FRACC TIS Accreditation Status Excel workbook.
 
-    Sheet 1 — TIS Accreditation Status
-        Grouped: Owning Group header → TOC sub-header →
-                 column headers → colour-coded data rows.
+    Formatting matches the reference file exactly:
+      Font:        Aptos, 10pt (OG headers: 11pt)
+      OG header:   fill=1F4E79, font=white, bold, center, row-height=18
+                   border: left/top/bottom=medium, right=thin
+      TOC header:  fill=2E75B6, font=white, bold, center, row-height=15
+                   border: left=medium, right=thin, top/bottom=thin
+                   merged A:F
+      Col header:  fill=B4C6E7, no font colour override, bold, center, row-height=15
+                   border: left=medium on A, medium on F, thin elsewhere
+      Data rows:   entire row filled with state colour, center-aligned, row-height=14
+                   border: left=medium on A, medium on F, thin elsewhere
+      State fills: Accredited=C6EFCE, Pilot phase=FFEB9C, Expired=FFC7CE
+      Spacer:      1 blank row between OG groups
 
-    Sheet 2 — Pivot Data
-        Flat table of all peak-count rows.
-
-    Sheet 3 — Accreditation Status Chart
-        Summary counts by State (data source for pie chart).
+    Sheet 1 — TIS Accreditation Status  (grouped view)
+    Sheet 2 — Pivot Data                (flat table)
+    Sheet 3 — Accreditation Status Chart (summary + source for pie)
     """
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
     print("\n[3] Building FRACC Excel file…")
     wb = Workbook()
 
-    # ── Sheet 1: TIS Accreditation Status ─────────────────────────────
+    # ── Colour/style constants (from reference file) ─────────────────
+    OG_FILL   = "1F4E79"   # dark navy
+    OG_FONT   = "FFFFFF"
+    TOC_FILL  = "2E75B6"   # mid blue
+    TOC_FONT  = "FFFFFF"
+    COL_FILL  = "B4C6E7"   # light blue
+
+    STATE_FILL = {
+        "Accredited":               "C6EFCE",
+        "Pilot phase":              "FFEB9C",
+        "Accreditation expired":    "FFC7CE",
+        "Application acknowledged": "FFEB9C",
+        "Abandoned":                "FFC7CE",
+    }
+
+    FONT_NAME = "Aptos"
+
+    def _font(bold=False, size=10.0, colour=None):
+        kw = dict(name=FONT_NAME, size=size, bold=bold)
+        if colour:
+            kw["color"] = colour
+        return Font(**kw)
+
+    def _fill(hex_colour):
+        # Ensure full ARGB 8-char hex (openpyxl needs FFRRGGBB not RRGGBB)
+        hx = hex_colour.lstrip("#")
+        if len(hx) == 6:
+            hx = "FF" + hx
+        return PatternFill("solid", fgColor=hx)
+
+    def _aln(horizontal="center", wrap=False):
+        return Alignment(horizontal=horizontal, vertical="center",
+                         wrap_text=wrap)
+
+    def _border(left="thin", right="thin", top="thin", bottom="thin"):
+        def s(style): return Side(style=style) if style else Side(style=None)
+        return Border(left=s(left), right=s(right), top=s(top), bottom=s(bottom))
+
+    # Border presets
+    OG_BORDER    = _border(left="medium", right="thin",   top="medium",  bottom="medium")
+    TOC_BORDER   = _border(left="medium", right="thin",   top="thin",    bottom="thin")
+    COLHDR_INNER = _border(left="thin",   right="thin",   top="thin",    bottom="thin")
+    COLHDR_FIRST = _border(left="medium", right="thin",   top="thin",    bottom="thin")
+    COLHDR_LAST  = _border(left="thin",   right="medium", top="thin",    bottom="thin")
+    DATA_INNER   = _border(left="thin",   right="thin",   top="thin",    bottom="thin")
+    DATA_FIRST   = _border(left="medium", right="thin",   top="thin",    bottom="thin")
+    DATA_LAST    = _border(left="thin",   right="medium", top="thin",    bottom="thin")
+
+    def _set(cell, value=None, font=None, fill=None, alignment=None, border=None):
+        if value is not None:
+            cell.value = value
+        if font:      cell.font      = font
+        if fill:      cell.fill      = fill
+        if alignment: cell.alignment = alignment
+        if border:    cell.border    = border
+
+    def _write_row(ws, row_num, values, font, fill, borders, heights):
+        """Write 6-cell row with per-cell borders."""
+        ws.row_dimensions[row_num].height = heights
+        for ci, (val, bdr) in enumerate(zip(values, borders), start=1):
+            _set(ws.cell(row=row_num, column=ci),
+                 value=val, font=font, fill=fill,
+                 alignment=_aln("center", wrap=(heights == 18)),
+                 border=bdr)
+
+    # ═══════════════════════════════════════════════════════════
+    # SHEET 1 — TIS Accreditation Status
+    # ═══════════════════════════════════════════════════════════
     ws1 = wb.active
     ws1.title = "TIS Accreditation Status"
+    ws1.freeze_panes = "A1"
 
-    DATA_COLS   = ["System", "Machine Type ID", "Version", "State", "Count", "CoA Expiry"]
-    COL_WIDTHS  = [40, 18, 16, 28, 10, 16]
+    # Column widths (from reference)
+    ws1.column_dimensions["A"].width = 46.0
+    ws1.column_dimensions["B"].width = 14.0
+    ws1.column_dimensions["D"].width = 22.0
+    ws1.column_dimensions["E"].width = 10.0
+    ws1.column_dimensions["F"].width = 16.0
+
+    COL_HDRS = ["System", "Machine Type ID", "Version", "State", "Count", "CoA Expiry"]
 
     row_num = 1
 
     for app_letter, og_display in APPENDIX_MAP:
-        # Match on both exact and case-insensitive
         og_data = peak_df[peak_df["Owning Group"] == og_display]
         if og_data.empty:
-            og_data = peak_df[
-                peak_df["Owning Group"].str.lower() == og_display.lower()
-            ]
-        if og_data.empty:
-            continue  # Skip owning groups with no data
+            continue
 
-        # ── Owning Group header row ──────────────────────────────────
+        # ── Owning Group header (merged A:F) ──────────────────────
         ws1.merge_cells(
             start_row=row_num, start_column=1,
             end_row=row_num,   end_column=6
         )
-        c = ws1.cell(row=row_num, column=1,
-                     value=f"Appendix {app_letter} — {og_display}")
-        c.font      = Font(bold=True, color=HDR_FONT_HEX, name="Calibri", size=12)
-        c.fill      = _hdr_fill(HDR_FILL_HEX)
-        c.alignment = _centre()
-        c.border    = _thin_border()
+        og_label = f"Appendix {app_letter} — {og_display}"
+        _set(ws1.cell(row=row_num, column=1),
+             value=og_label,
+             font=_font(bold=True, size=11.0, colour=OG_FONT),
+             fill=_fill(OG_FILL),
+             alignment=_aln("center", wrap=True),
+             border=OG_BORDER)
+        # Apply borders to cells B-F of merged row too
+        for ci in range(2, 7):
+            c = ws1.cell(row=row_num, column=ci)
+            c.fill   = _fill(OG_FILL)
+            c.border = OG_BORDER
+        ws1.row_dimensions[row_num].height = 18.0
         row_num += 1
 
-        # ── TOC sub-groups ────────────────────────────────────────────
         for toc in sorted(og_data["TOC / LPC"].dropna().unique()):
             toc_data = og_data[og_data["TOC / LPC"] == toc]
 
-            # TOC sub-header
+            # ── TOC sub-header (merged A:F) ──────────────────────
             ws1.merge_cells(
                 start_row=row_num, start_column=1,
                 end_row=row_num,   end_column=6
             )
-            tc = ws1.cell(row=row_num, column=1, value=toc)
-            tc.font      = Font(bold=True, color=SUBHDR_FONT, name="Calibri", size=10)
-            tc.fill      = PatternFill("solid", fgColor=SUBHDR_FILL)
-            tc.alignment = _left()
-            tc.border    = _thin_border()
+            _set(ws1.cell(row=row_num, column=1),
+                 value=toc,
+                 font=_font(bold=True, size=10.0, colour=TOC_FONT),
+                 fill=_fill(TOC_FILL),
+                 alignment=_aln("center", wrap=True),
+                 border=TOC_BORDER)
+            for ci in range(2, 7):
+                c = ws1.cell(row=row_num, column=ci)
+                c.fill   = _fill(TOC_FILL)
+                c.border = TOC_BORDER
+            ws1.row_dimensions[row_num].height = 15.0
             row_num += 1
 
-            # Column headers
-            for ci, hdr in enumerate(DATA_COLS, start=1):
-                ch = ws1.cell(row=row_num, column=ci, value=hdr)
-                ch.font      = Font(bold=True, color=COL_HDR_FONT,
-                                    name="Calibri", size=9)
-                ch.fill      = PatternFill("solid", fgColor=COL_HDR_FILL)
-                ch.alignment = _centre()
-                ch.border    = _thin_border()
+            # ── Column headers ────────────────────────────────────
+            col_hdr_borders = [COLHDR_FIRST] + [COLHDR_INNER] * 4 + [COLHDR_LAST]
+            ws1.row_dimensions[row_num].height = 15.0
+            for ci, (hdr, bdr) in enumerate(zip(COL_HDRS, col_hdr_borders), start=1):
+                _set(ws1.cell(row=row_num, column=ci),
+                     value=hdr,
+                     font=_font(bold=True, size=10.0),
+                     fill=_fill(COL_FILL),
+                     alignment=_aln("center", wrap=True),
+                     border=bdr)
             row_num += 1
 
-            # Data rows
+            # ── Data rows ─────────────────────────────────────────
             for _, drow in toc_data.sort_values(
                     ["System", "Machine Type ID", "Version"]).iterrows():
                 state    = str(drow.get("State", ""))
                 fill_hex = STATE_FILL.get(state, "FFFFFF")
-                font_hex = STATE_FONT.get(state, "000000")
 
-                vals = [
+                coa = drow.get("CoA Expiry", "")
+
+                vals    = [
                     drow.get("System",          ""),
                     drow.get("Machine Type ID", ""),
                     drow.get("Version",         ""),
                     state,
                     drow.get("Count", 0),
-                    drow.get("CoA Expiry",      ""),
+                    coa,
                 ]
-                for ci, val in enumerate(vals, start=1):
-                    dc = ws1.cell(row=row_num, column=ci, value=val)
-                    dc.border    = _thin_border()
-                    dc.alignment = _left() if ci == 1 else _centre()
-                    dc.font      = Font(name="Calibri", size=9)
-                    if ci == 4:  # State — colour coded
-                        dc.fill = PatternFill("solid", fgColor=fill_hex)
-                        dc.font = Font(bold=True, color=font_hex,
-                                       name="Calibri", size=9)
+                data_borders = [DATA_FIRST] + [DATA_INNER] * 4 + [DATA_LAST]
+                ws1.row_dimensions[row_num].height = 14.0
+                for ci, (val, bdr) in enumerate(zip(vals, data_borders), start=1):
+                    _set(ws1.cell(row=row_num, column=ci),
+                         value=val,
+                         font=_font(bold=False, size=10.0),
+                         fill=_fill(fill_hex),
+                         alignment=_aln("center"),
+                         border=bdr)
                 row_num += 1
 
-        row_num += 1  # blank spacer row between owning groups
+        row_num += 1  # spacer blank row between OG groups
 
-    for ci, w in enumerate(COL_WIDTHS, start=1):
-        ws1.column_dimensions[get_column_letter(ci)].width = w
-    ws1.freeze_panes = "A1"
-
-    # ── Sheet 2: Pivot Data ────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════
+    # SHEET 2 — Pivot Data
+    # ═══════════════════════════════════════════════════════════
     ws2 = wb.create_sheet("Pivot Data")
+
     PIVOT_COLS   = ["Owning Group", "TOC / LPC", "System",
                     "Machine Type ID", "Version", "State", "Count", "CoA Expiry"]
-    PIVOT_WIDTHS = [34, 40, 40, 18, 16, 28, 10, 16]
+    PIVOT_WIDTHS = {"A": 38.0, "B": 34.0, "C": 46.0, "D": 15.0,
+                    "E": 14.0, "F": 24.0, "G": 10.0, "H": 16.0}
+    # Left-aligned columns (from reference)
+    LEFT_COLS_PIVOT = {1, 2, 3}  # Owning Group, TOC/LPC, System
 
+    for cl, w in PIVOT_WIDTHS.items():
+        ws2.column_dimensions[cl].width = w
+
+    # Header row
     for ci, hdr in enumerate(PIVOT_COLS, start=1):
-        ch = ws2.cell(row=1, column=ci, value=hdr)
-        ch.font      = _hdr_font()
-        ch.fill      = _hdr_fill()
-        ch.alignment = _centre()
-        ch.border    = _thin_border()
+        _set(ws2.cell(row=1, column=ci),
+             value=hdr,
+             font=_font(bold=True, size=10.0),
+             fill=_fill(COL_FILL),
+             alignment=_aln("center"),
+             border=_border())
 
+    # Data rows
     export_df = peak_df[[c for c in PIVOT_COLS if c in peak_df.columns]]
     for ri, (_, row) in enumerate(export_df.iterrows(), start=2):
+        state    = str(row.get("State", ""))
+        fill_hex = STATE_FILL.get(state, "FFFFFF")
         for ci, col in enumerate(PIVOT_COLS, start=1):
-            val = row.get(col, "")
-            dc  = ws2.cell(row=ri, column=ci, value=val)
-            dc.border    = _thin_border()
-            dc.alignment = _left() if ci <= 3 else _centre()
-            dc.font      = Font(name="Calibri", size=9)
-            if col == "State":
-                state = str(val)
-                dc.fill = PatternFill("solid",
-                                      fgColor=STATE_FILL.get(state, "FFFFFF"))
-                dc.font = Font(bold=True,
-                               color=STATE_FONT.get(state, "000000"),
-                               name="Calibri", size=9)
+            val  = row.get(col, "")
+            halign = "left" if ci in LEFT_COLS_PIVOT else "center"
+            _set(ws2.cell(row=ri, column=ci),
+                 value=val,
+                 font=_font(bold=False, size=10.0),
+                 fill=_fill(fill_hex),
+                 alignment=Alignment(horizontal=halign, vertical="center"),
+                 border=_border())
 
-    for ci, w in enumerate(PIVOT_WIDTHS, start=1):
-        ws2.column_dimensions[get_column_letter(ci)].width = w
     ws2.freeze_panes = "A2"
 
-    # ── Sheet 3: Accreditation Status Chart ───────────────────────────
+    # ═══════════════════════════════════════════════════════════
+    # SHEET 3 — Accreditation Status Chart
+    # ═══════════════════════════════════════════════════════════
     ws3 = wb.create_sheet("Accreditation Status Chart")
-    STATE_ORDER = [
-        "Accredited", "Pilot phase",
-        "Accreditation expired", "Application acknowledged",
-    ]
+    ws3.column_dimensions["A"].width = 28.0
+    ws3.column_dimensions["B"].width = 12.0
+
+    STATE_ORDER = ["Accredited", "Pilot phase", "Accreditation expired",
+                   "Application acknowledged"]
     counts = {
         s: int(peak_df[peak_df["State"] == s]["Count"].sum())
         for s in STATE_ORDER
@@ -582,36 +683,40 @@ def build_fracc_excel(
     }
     grand_total = sum(counts.values())
 
-    ws3.cell(row=1, column=1, value="Accreditation Status").font = _hdr_font()
-    ws3.cell(row=1, column=1).fill      = _hdr_fill()
-    ws3.cell(row=1, column=1).alignment = _centre()
-    ws3.cell(row=1, column=2, value="Count").font = _hdr_font()
-    ws3.cell(row=1, column=2).fill      = _hdr_fill()
-    ws3.cell(row=1, column=2).alignment = _centre()
+    # Header
+    for ci, hdr in enumerate(["Accreditation Status", "Count"], start=1):
+        _set(ws3.cell(row=1, column=ci),
+             value=hdr,
+             font=_font(bold=True, size=10.0),
+             fill=_fill(COL_FILL),
+             alignment=_aln("center"),
+             border=_border())
 
+    # State rows
     for ri, (state, cnt) in enumerate(counts.items(), start=2):
-        ws3.cell(row=ri, column=1, value=state).border = _thin_border()
-        ws3.cell(row=ri, column=2, value=cnt).border   = _thin_border()
+        fill_hex = STATE_FILL.get(state, "FFFFFF")
+        for ci, val in enumerate([state, cnt], start=1):
+            _set(ws3.cell(row=ri, column=ci),
+                 value=val,
+                 font=_font(bold=False, size=10.0),
+                 fill=_fill(fill_hex),
+                 alignment=_aln("center"),
+                 border=_border())
 
-    last_data = 1 + len(counts)
-    ws3.cell(row=last_data + 1, column=1,
-             value="Total Devices").font = Font(bold=True, name="Calibri")
-    ws3.cell(row=last_data + 1, column=2,
-             value=grand_total).font     = Font(bold=True, name="Calibri")
-    ws3.column_dimensions["A"].width = 30
-    ws3.column_dimensions["B"].width = 12
+    # Total row
+    last = 1 + len(counts)
+    for ci, val in enumerate(["Total Devices", grand_total], start=1):
+        _set(ws3.cell(row=last+1, column=ci),
+             value=val,
+             font=_font(bold=True, size=10.0))
 
-    # ── Save ──────────────────────────────────────────────────────────
+    # ── Save ──────────────────────────────────────────────────
     fname = f"FRACC - TIS Accreditation Status - Latest - {timestamp}.xlsx"
     fpath = os.path.join(output_dir, fname)
     wb.save(fpath)
     print(f"    Saved FRACC Excel → {fname}")
     return fpath, counts, grand_total
 
-
-# ════════════════════════════════════════════════════════════════════
-# STEP 4 — Generate pie chart PNG
-# ════════════════════════════════════════════════════════════════════
 
 def generate_pie_chart(counts: dict, total: int, output_dir: str) -> str:
     """
