@@ -90,6 +90,15 @@ OG_ALIASES = {
     "scottish rail holdings":                            "Scottish Rail Holdings",
 }
 
+# TOC-level owning group overrides
+# These take precedence over whatever Owning Group the source data carries.
+# Format: { "TOC / LPC value (exact)": "Canonical Owning Group name" }
+TOC_OG_OVERRIDES = {
+    "GTR - SOUTHERN & GATWICK EXPRESS":  "Directly Operated Railway",
+    "GTR-THAMESLINK & GREAT NORTHERN":   "Directly Operated Railway",
+    "WEST MIDLANDS TRAINS LTD":          "Directly Operated Railway",
+}
+
 # Bookmark names for each appendix (must match bookmarks in template)
 BOOKMARK_MAP = {
     "A": "Appendix_A",
@@ -195,6 +204,11 @@ def _normalise_pivot(df: pd.DataFrame) -> pd.DataFrame:
     })
     df["Count"] = pd.to_numeric(df["Count"], errors="coerce").fillna(0).astype(int)
     df["Owning Group"] = df["Owning Group"].apply(_canonicalise_og)
+    # Apply per-TOC owning group overrides
+    df["Owning Group"] = df.apply(
+        lambda r: TOC_OG_OVERRIDES.get(str(r["TOC / LPC"]).strip(), r["Owning Group"]),
+        axis=1
+    )
     return df[[c for c in ["Owning Group","TOC / LPC","System","Machine Type ID",
                             "Version","State","Count","CoA Expiry"] if c in df.columns]]
 
@@ -217,6 +231,11 @@ def _normalise_raw(df: pd.DataFrame) -> pd.DataFrame:
     })
     # Raw format does not carry Owning Group — set as Unknown for peak logic
     df["Owning Group"] = "Unknown"
+    # Apply per-TOC owning group overrides
+    df["Owning Group"] = df.apply(
+        lambda r: TOC_OG_OVERRIDES.get(str(r.get("TOC / LPC", "")).strip(), r["Owning Group"]),
+        axis=1
+    )
     return df[["Owning Group","TOC / LPC","System","Machine Type ID",
                "Version","State","Count","CoA Expiry"]]
 
