@@ -549,7 +549,7 @@ def build_fracc_excel(
             start_row=row_num, start_column=1,
             end_row=row_num,   end_column=6
         )
-        og_label = f"Appendix {app_letter} — {og_display}"
+        og_label = og_display
         _set(ws1.cell(row=row_num, column=1),
              value=og_label,
              font=_font(bold=True, size=11.0, colour=OG_FONT),
@@ -1118,6 +1118,24 @@ def patch_word_document(
                     break
 
     print(f"    ✓ Converted {converted} appendix entries to internal hyperlinks")
+
+    # ── Patch 8: Strip "Appendix X — / - " prefix from section heading paragraphs ──
+    import re as _re
+    _strip_pat = _re.compile(
+        r"^Appendix\s+[A-Z]\s*[-\u2013\u2014]\s*",
+        _re.IGNORECASE
+    )
+    _headings_stripped = 0
+    for _p in doc2.paragraphs:
+        _txt = _p.text.strip()
+        if _strip_pat.match(_txt):
+            _new_text = _strip_pat.sub("", _p.text.lstrip()).rstrip()
+            if _p.runs:
+                _p.runs[0].text = _new_text
+                for _r in _p.runs[1:]:
+                    _r.text = ""
+                _headings_stripped += 1
+    print(f"    ✓ Stripped Appendix prefix from {_headings_stripped} section headings in Word doc")
 
     # ── Save final document ──────────────────────────────────────────
     out_name = (f"FRACC Paper - Accreditation Status Update "
